@@ -1,0 +1,34 @@
+# Secrets: never commit real configuration.
+.env
+.env.local
+*.env.local
+
+# Generated Kubernetes manifests. They are reproducible from the source project
+# and may contain environment-specific values.
+generated/*
+!generated/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Kubernetes credentials
+kubeconfig
+*.kubeconfig

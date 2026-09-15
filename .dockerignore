@@ -1,0 +1,23 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Never bake secrets or a host kubeconfig into the image.
+.env
+.env.local
+kubeconfig
+*.kubeconfig
+
+generated
+docs
+tests
+*.md
+!README.md
+.vscode
+.idea
