@@ -490,3 +490,5 @@ it is solid end to end.
 
 MIT
 # docker2k8s-mcp-server
+
+[![M8ven Score](https://m8ven.ai/badge/mcp/vishalnotfound/docker2k8s-mcp-server)](https://m8ven.ai/mcp/vishalnotfound/docker2k8s-mcp-server)
