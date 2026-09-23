@@ -29,7 +29,7 @@ else
     source .venv/bin/activate
 fi
 
-# Run docker2k8s-mcp
+# Run docker2k8s-mcp app
 if [ $# -eq 0 ]; then
     echo ""
     echo "======================================================="
