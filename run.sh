@@ -4,7 +4,7 @@ set -e
 # Navigate to the project root directory
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Find python3 or python
+# Finds python
 if command -v python3 >/dev/null 2>&1; then
     PYTHON_CMD="python3"
 elif command -v python >/dev/null 2>&1; then
