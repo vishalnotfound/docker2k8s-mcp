@@ -22,7 +22,7 @@ reference agent included here.
 
 ---
 
-## Contents
+## Contents [Mostly helpful for remote LLM clients]
 
 - [Architecture](#architecture)
 - [Features](#features)
