@@ -1,5 +1,8 @@
 # docker2k8s-mcp
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/vishalnotfound/docker2k8s-mcp-server)](https://m8ven.ai/mcp/vishalnotfound/docker2k8s-mcp-server)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An MCP server that lets an LLM migrate a Docker / Docker Compose application to
 Kubernetes — inspect it, plan the migration, generate manifests, validate them,
 deploy them after you approve, verify the result, and diagnose what went wrong.
@@ -488,7 +491,4 @@ it is solid end to end.
 
 ## License
 
-MIT
-# docker2k8s-mcp-server
-
-[![M8ven Score](https://m8ven.ai/badge/mcp/vishalnotfound/docker2k8s-mcp-server)](https://m8ven.ai/mcp/vishalnotfound/docker2k8s-mcp-server)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
