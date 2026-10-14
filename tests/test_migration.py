@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.security import REQUIRED_SECRET
-from src.services import migration_service
+from docker2k8s_mcp.security import REQUIRED_SECRET
+from docker2k8s_mcp.services import migration_service
 
 
 # --------------------------------------------------------------------------

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from src.errors import ComposeFileNotFound, InvalidComposeFile, PathNotAllowed, ProjectNotFound
-from src.services import docker_service
+from docker2k8s_mcp.errors import ComposeFileNotFound, InvalidComposeFile, PathNotAllowed, ProjectNotFound
+from docker2k8s_mcp.services import docker_service
 
 
 # --------------------------------------------------------------------------

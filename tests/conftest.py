@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import get_settings  # noqa: E402
+from docker2k8s_mcp.config import get_settings  # noqa: E402
 
 COMPOSE = """\
 services:

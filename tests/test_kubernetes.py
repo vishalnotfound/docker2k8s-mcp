@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.errors import InvalidManifest
-from src.generators import kubernetes as generator
-from src.security import REQUIRED_SECRET
-from src.services import migration_service
-from src.validators import kubernetes as validator
+from docker2k8s_mcp.errors import InvalidManifest
+from docker2k8s_mcp.generators import kubernetes as generator
+from docker2k8s_mcp.security import REQUIRED_SECRET
+from docker2k8s_mcp.services import migration_service
+from docker2k8s_mcp.validators import kubernetes as validator
 
 
 @pytest.fixture
@@ -443,7 +443,7 @@ spec:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cluster_is_reachable() -> None:
-    from src.services import k8s_service
+    from docker2k8s_mcp.services import k8s_service
 
     info = await k8s_service.cluster_info()
 
@@ -453,11 +453,15 @@ async def test_cluster_is_reachable() -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_server_side_dry_run_accepts_generated_manifests(output_dir: str) -> None:
+async def test_server_side_dry_run_accepts_generated_manifests(project: Path) -> None:
     """A dry run proves the API server itself accepts the manifests."""
-    from src.services import k8s_service
+    from docker2k8s_mcp.services import k8s_service
 
-    result = await k8s_service.apply_manifests(output_dir, namespace="default", dry_run=True)
+    namespace = "docker2k8s-integration"
+    plan = migration_service.create_migration_plan(str(project), namespace=namespace)
+    output_dir = generator.generate_manifests(plan).output_dir
+    bundle = validator.load_manifests(output_dir)
+    result = await k8s_service.apply_manifests(bundle, namespace=namespace, dry_run=True)
 
     assert result.dry_run is True
     assert result.applied is False
