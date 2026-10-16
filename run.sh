@@ -4,7 +4,7 @@ set -e
 # Navigate to the project root directory
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Finds python
+# Find Python 3
 if command -v python3 >/dev/null 2>&1; then
     PYTHON_CMD="python3"
 elif command -v python >/dev/null 2>&1; then
@@ -15,21 +15,26 @@ else
 fi
 
 # Set up or activate virtual environment
-if [ ! -f ".venv/bin/python" ]; then
+if [ ! -f ".venv/bin/activate" ]; then
     echo "Creating virtual environment..."
+    rm -rf .venv
     "$PYTHON_CMD" -m venv .venv
-    source .venv/bin/activate
+fi
+source .venv/bin/activate
+
+# Reinstall whenever pyproject.toml changed since the last install, so new
+# dependencies and entry points are picked up.
+if ! python -c "import os,sys; s='.venv/.installed'; sys.exit(0 if os.path.exists(s) and os.path.getmtime(s) >= os.path.getmtime('pyproject.toml') else 1)" 2>/dev/null; then
     echo "Installing dependencies..."
     pip install -e .
-    if [ -f ".env.example" ] && [ ! -f ".env" ]; then
-        cp .env.example .env
-        echo "Created .env from .env.example"
-    fi
-else
-    source .venv/bin/activate
+    touch .venv/.installed
 fi
 
-# Run docker2k8s-mcp app
+if [ -f ".env.example" ] && [ ! -f ".env" ]; then
+    cp .env.example .env
+    echo "Created .env from .env.example"
+fi
+
 if [ $# -eq 0 ]; then
     echo ""
     echo "======================================================="
