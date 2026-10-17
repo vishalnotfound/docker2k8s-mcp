@@ -13,12 +13,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _is_too_broad(path: Path) -> bool:
+    """A filesystem root, the home directory or one of its ancestors.
+
+    MCP clients often launch servers from one of these, and sandboxing to it
+    would expose far more than the user's projects.
+    """
+    home = Path.home().resolve()
+    return path == Path(path.anchor) or path == home or path in home.parents
+
 
 class Settings(BaseSettings):
     """Runtime settings.  Every value can be overridden by an env var."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Anchored to the checkout, not the working directory: MCP clients start
+        # the server from arbitrary directories, which may hold some other
+        # project's .env.
+        env_file=_PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -48,11 +63,25 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     debug: bool = Field(default=False)
     kubectl_timeout: int = Field(default=120, description="Seconds before a kubectl call is aborted.")
+    mcp_auth_token: str | None = Field(
+        default=None,
+        description="Bearer token required by the http/sse transports. Mandatory off-loopback.",
+    )
 
     @field_validator("log_level")
     @classmethod
     def _upper(cls, value: str) -> str:
-        return value.upper()
+        value = value.upper()
+        if value not in LOG_LEVELS:
+            raise ValueError(f"LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}")
+        return value
+
+    @field_validator("generated_dir")
+    @classmethod
+    def _anchor(cls, value: Path) -> Path:
+        # './generated' in .env means the checkout's folder, wherever we were launched from.
+        value = value.expanduser()
+        return value if value.is_absolute() else _PROJECT_ROOT / value
 
     @property
     def allowed_root_paths(self) -> list[Path]:
@@ -63,9 +92,12 @@ class Settings(BaseSettings):
             for part in raw.split(os.pathsep):
                 part = part.strip()
                 if part:
-                    roots.append(Path(part).expanduser().resolve())
+                    path = Path(part).expanduser()
+                    roots.append((path if path.is_absolute() else _PROJECT_ROOT / path).resolve())
         else:
-            roots.append(Path.cwd().resolve())
+            cwd = Path.cwd().resolve()
+            if not _is_too_broad(cwd):
+                roots.append(cwd)
             roots.append(_PROJECT_ROOT)
         roots.append(self.generated_dir.resolve())
         # de-duplicate, keep order

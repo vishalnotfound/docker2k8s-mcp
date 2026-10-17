@@ -1,32 +1,36 @@
 [project]
 name = "docker2k8s-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for AI-assisted Docker -> Kubernetes migration"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    "mcp>=1.13,<3",
+    # The code uses the 2.x API (mcp.server.mcpserver, snake_case annotations).
+    "mcp>=2.1,<3",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "PyYAML>=6.0",
     "python-dotenv>=1.0",
     "kubernetes>=30.1",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
 client = ["openai>=1.40"]
+web = ["aiohttp>=3.9", "openai>=1.40"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-docker2k8s-mcp = "src.main:main"
+docker2k8s-mcp = "docker2k8s_mcp.main:main"
+docker2k8s-agent = "docker2k8s_mcp.client.agent:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src", "client"]
+packages = ["docker2k8s_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

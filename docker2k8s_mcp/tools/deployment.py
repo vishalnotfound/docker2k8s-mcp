@@ -18,14 +18,18 @@ from ..schemas import (
     EventInfo,
     PodInfo,
     ServiceInfo,
-    ValidationResult,
     VerificationResult,
 )
 from ..services import k8s_service
 from ..validators import kubernetes as validator
 from . import mcp_errors
 
-READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
 DESTRUCTIVE = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=True,
@@ -57,11 +61,13 @@ def register(mcp: MCPServer) -> None:
         description=(
             "DEPLOY. This writes to the cluster and changes running workloads. "
             "Requires approved=true, which you may only pass after the user has seen the "
-            "migration plan and its warnings and has explicitly said to deploy. Do not "
-            "infer approval from the original request. Run validate_manifests first; this "
-            "tool refuses to apply manifests that fail validation. Use dry_run=true to "
-            "have the API server check the manifests without changing anything -- a dry "
-            "run needs no approval."
+            "migration plan, its warnings and blockers, and has explicitly said to deploy. "
+            "Do not infer approval from the original request. Run validate_manifests first; "
+            "this tool refuses manifests that fail validation, kinds it does not deploy, "
+            "Secrets that still hold placeholders (an existing Secret is left untouched), "
+            "and objects another project owns. Omit namespace to deploy where the manifests "
+            "say. Use dry_run=true to have the API server check the manifests without "
+            "changing anything -- a dry run needs no approval."
         ),
     )
     @mcp_errors
@@ -75,7 +81,8 @@ def register(mcp: MCPServer) -> None:
 
         Args:
             path: Manifest file or directory (the output_dir from generate_manifests).
-            namespace: Target namespace. Defaults to the server's configured one.
+            namespace: Target namespace. Defaults to the one in the manifests; passing a
+                different one is refused rather than silently mixed.
             approved: Must be true for a real deployment. Set it only after the user
                 has explicitly approved this deployment.
             dry_run: Server-side dry run. Validates against the live API without
@@ -92,7 +99,9 @@ def register(mcp: MCPServer) -> None:
                 ),
             )
 
-        result: ValidationResult = validator.validate_manifests(path)
+        # Parse once: exactly the documents that pass validation are applied.
+        bundle = validator.load_manifests(path)
+        result = validator.validate_bundle(bundle)
         if not result.valid:
             errors = "\n".join(
                 f"- [{i.code}] {i.message}" for i in result.issues if i.severity == "error"
@@ -103,7 +112,7 @@ def register(mcp: MCPServer) -> None:
                 "What to try: fix the manifests (or regenerate them) and validate again."
             )
 
-        return await k8s_service.apply_manifests(path, namespace=namespace, dry_run=dry_run)
+        return await k8s_service.apply_manifests(bundle, namespace=namespace, dry_run=dry_run)
 
     @mcp.tool(
         title="Get deployment status",
@@ -215,9 +224,9 @@ def register(mcp: MCPServer) -> None:
         title="Verify deployment",
         annotations=READ_ONLY,
         description=(
-            "Run the post-deployment checks in one call: the workload exists, ready "
-            "replicas match desired, pods are Running and Ready, restart counts are zero, "
-            "Services exist and have endpoints, and optionally that a health endpoint "
+            "Run the post-deployment checks in one call: the workload exists and its latest "
+            "rollout is complete, pods are Running and Ready, no pod restarted in the last "
+            "5 minutes, Services have endpoints, and optionally that a health endpoint "
             "responds through the API server proxy. Never assume a deployment succeeded -- "
             "call this. If healthy is false, call diagnose_deployment."
         ),
@@ -227,6 +236,7 @@ def register(mcp: MCPServer) -> None:
         namespace: str | None = None,
         names: list[str] | None = None,
         health_path: str | None = None,
+        health_services: list[str] | None = None,
     ) -> VerificationResult:
         """Verify that a deployment is actually serving.
 
@@ -234,8 +244,10 @@ def register(mcp: MCPServer) -> None:
             namespace: Namespace to verify.
             names: Workload names to check. Defaults to everything this tool deployed.
             health_path: Optional HTTP path to probe, e.g. "/health".
+            health_services: Services to probe health_path on. Defaults to the exposed
+                or http-named ones, so databases are not sent HTTP requests.
         """
-        return await k8s_service.verify_deployment(namespace, names, health_path)
+        return await k8s_service.verify_deployment(namespace, names, health_path, health_services)
 
     @mcp.tool(
         title="Diagnose deployment failure",

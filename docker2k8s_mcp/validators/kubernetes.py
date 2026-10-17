@@ -7,7 +7,10 @@ no container listens on, a reference to a ConfigMap that was never generated.
 
 from __future__ import annotations
 
+import base64
 import logging
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -41,8 +44,32 @@ EXPECTED_API_VERSIONS: dict[str, set[str]] = {
 
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob"}
 
+_DNS1123_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+_DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_DNS1035_LABEL = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
+_LABEL_VALUE = re.compile(r"^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$")
+_PORT_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_PLACEHOLDER_B64 = base64.b64encode(REQUIRED_SECRET.encode()).decode()
 
-class _Resource:
+#: Kinds whose names are DNS labels rather than subdomains, and which rule applies.
+_LABEL_NAMED_KINDS = {"Service": _DNS1035_LABEL, "Namespace": _DNS1123_LABEL}
+
+
+class _ManifestLoader(yaml.SafeLoader):
+    """SafeLoader that keeps timestamps as the strings they were written as.
+
+    Documents are re-serialised for 'kubectl apply -f -'; a datetime would come
+    back out in a different format than the author wrote.
+    """
+
+
+_ManifestLoader.yaml_implicit_resolvers = {
+    first: [(tag, rx) for tag, rx in resolvers if tag != "tag:yaml.org,2002:timestamp"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
+class ManifestDoc:
     """A parsed manifest document plus where it came from."""
 
     def __init__(self, doc: dict[str, Any], file: Path, index: int) -> None:
@@ -63,12 +90,29 @@ class _Resource:
         return str((self.doc.get("metadata") or {}).get("namespace", "default"))
 
     @property
+    def declared_namespace(self) -> str | None:
+        return (self.doc.get("metadata") or {}).get("namespace")
+
+    @property
     def ref(self) -> str:
         return f"{self.kind}/{self.name}" if self.name else f"{self.kind or 'unknown'}[{self.index}]"
 
 
-def validate_manifests(path: str) -> ValidationResult:
-    """Validate a manifest file or a directory of them."""
+_Resource = ManifestDoc
+
+
+@dataclass
+class ManifestBundle:
+    """Every document under a path, parsed once and shared by validate and apply."""
+
+    target: Path
+    files: list[Path]
+    resources: list[ManifestDoc] = field(default_factory=list)
+    parse_issues: list[ValidationIssue] = field(default_factory=list)
+
+
+def load_manifests(path: str) -> ManifestBundle:
+    """Parse a manifest file or every YAML file under a directory."""
     target = resolve_project_path(path)
     files = _collect_files(target)
     if not files:
@@ -76,13 +120,22 @@ def validate_manifests(path: str) -> ValidationResult:
             f"No YAML manifests found at '{target}'.",
             hint="Run generate_manifests first, then validate its output_dir.",
         )
-
-    logger.info("Validating %d manifest file(s) in %s", len(files), target)
-    issues: list[ValidationIssue] = []
-    resources: list[_Resource] = []
-
+    bundle = ManifestBundle(target=target, files=files)
     for file in files:
-        resources.extend(_parse_file(file, issues))
+        bundle.resources.extend(_parse_file(file, bundle.parse_issues))
+    return bundle
+
+
+def validate_manifests(path: str) -> ValidationResult:
+    """Validate a manifest file or a directory of them."""
+    return validate_bundle(load_manifests(path))
+
+
+def validate_bundle(bundle: ManifestBundle) -> ValidationResult:
+    """Run every check over documents that were already loaded."""
+    files, resources, target = bundle.files, bundle.resources, bundle.target
+    logger.info("Validating %d manifest file(s) in %s", len(files), target)
+    issues: list[ValidationIssue] = list(bundle.parse_issues)
 
     if resources:
         _check_duplicates(resources, issues)
@@ -126,7 +179,8 @@ def _collect_files(target: Path) -> list[Path]:
 
 def _parse_file(file: Path, issues: list[ValidationIssue]) -> list[_Resource]:
     try:
-        documents = list(yaml.safe_load_all(file.read_text(encoding="utf-8", errors="replace")))
+        with file.open(encoding="utf-8", errors="replace") as stream:
+            documents = list(yaml.load_all(stream, Loader=_ManifestLoader))  # noqa: S506
     except yaml.YAMLError as exc:
         issues.append(
             ValidationIssue(
@@ -214,20 +268,63 @@ def _check_common(resources: Iterable[_Resource], issues: list[ValidationIssue])
                     suggestion="Every resource needs a unique metadata.name.",
                 )
             )
-        elif not _is_dns1123(resource.name):
+        elif not _valid_name(resource.kind, resource.name):
+            rule = (
+                "at most 63 characters, lowercase alphanumeric or '-', starting with a letter"
+                if resource.kind == "Service"
+                else "lowercase alphanumeric, '-' or '.', starting and ending alphanumeric"
+            )
             issues.append(
                 ValidationIssue(
                     severity="error",
                     code="INVALID_NAME",
-                    message=(
-                        f"'{resource.name}' is not a valid Kubernetes name: it must be "
-                        "lowercase alphanumeric or '-', and start/end with alphanumeric."
-                    ),
+                    message=f"'{resource.name}' is not a valid {resource.kind} name: {rule}.",
                     file=str(resource.file),
                     resource=resource.ref,
                     suggestion="Rename to something like 'my-service'.",
                 )
             )
+
+        _check_labels(resource, issues)
+
+
+def _check_labels(resource: _Resource, issues: list[ValidationIssue]) -> None:
+    """Label values are limited to 63 characters of a restricted alphabet."""
+    doc = resource.doc
+    spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+    template = _pod_template(resource) if resource.kind in WORKLOAD_KINDS else None
+    if resource.kind == "Service":
+        selector = spec.get("selector")
+    else:
+        selector = (spec.get("selector") or {}).get("matchLabels") if isinstance(spec.get("selector"), dict) else None
+    sources = [
+        (doc.get("metadata") or {}).get("labels"),
+        ((template or {}).get("metadata") or {}).get("labels"),
+        selector,
+    ]
+    bad = sorted(
+        {
+            f"{key}={value}"
+            for labels in sources
+            if isinstance(labels, dict)
+            for key, value in labels.items()
+            if len(str(value)) > 63 or not _LABEL_VALUE.match(str(value))
+        }
+    )
+    if bad:
+        issues.append(
+            ValidationIssue(
+                severity="error",
+                code="INVALID_LABEL_VALUE",
+                message=f"{resource.ref} has invalid label value(s): {', '.join(bad)}.",
+                file=str(resource.file),
+                resource=resource.ref,
+                suggestion=(
+                    "Label values must be at most 63 characters of alphanumerics, '-', '_' "
+                    "or '.', starting and ending with an alphanumeric."
+                ),
+            )
+        )
 
 
 def _check_duplicates(resources: list[_Resource], issues: list[ValidationIssue]) -> None:
@@ -342,6 +439,13 @@ def _check_workloads(resources: list[_Resource], issues: list[ValidationIssue]) 
                     )
                 )
 
+            _check_port_names(
+                resource,
+                [p.get("name") for p in container.get("ports") or [] if isinstance(p, dict)],
+                f"container '{container.get('name')}'",
+                issues,
+                max_length=15,
+            )
             for port in container.get("ports") or []:
                 if not isinstance(port, dict):
                     continue
@@ -357,18 +461,6 @@ def _check_workloads(resources: list[_Resource], issues: list[ValidationIssue]) 
                             suggestion="containerPort must be an integer between 1 and 65535.",
                         )
                     )
-                name = port.get("name")
-                if name and len(str(name)) > 15:
-                    issues.append(
-                        ValidationIssue(
-                            severity="error",
-                            code="PORT_NAME_TOO_LONG",
-                            message=f"{resource.ref} port name '{name}' exceeds 15 characters.",
-                            file=str(resource.file),
-                            resource=resource.ref,
-                        )
-                    )
-
             _check_probes(resource, container, issues)
 
         # --- selector ------------------------------------------------------
@@ -573,6 +665,33 @@ def _check_services(resources: list[_Resource], issues: list[ValidationIssue]) -
                 )
             )
 
+        port_dicts = [p for p in ports if isinstance(p, dict)]
+        if len(port_dicts) > 1 and any(not p.get("name") for p in port_dicts):
+            issues.append(
+                ValidationIssue(
+                    severity="error",
+                    code="MULTIPORT_UNNAMED",
+                    message=f"{resource.ref} has multiple ports; every port must be named.",
+                    file=str(resource.file),
+                    resource=resource.ref,
+                )
+            )
+        _check_port_names(resource, [p.get("name") for p in port_dicts], "spec.ports", issues, 63)
+        seen: set[tuple[Any, str]] = set()
+        for port in port_dicts:
+            key = (port.get("port"), str(port.get("protocol") or "TCP"))
+            if key in seen:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="DUPLICATE_SERVICE_PORT",
+                        message=f"{resource.ref} exposes port {key[0]}/{key[1]} more than once.",
+                        file=str(resource.file),
+                        resource=resource.ref,
+                    )
+                )
+            seen.add(key)
+
         if not selector:
             if spec.get("clusterIP") != "None":
                 issues.append(
@@ -681,12 +800,45 @@ def _check_services(resources: list[_Resource], issues: list[ValidationIssue]) -
                         )
                     )
 
-        if len(ports) > 1 and any(not p.get("name") for p in ports if isinstance(p, dict)):
+
+
+def _check_port_names(
+    resource: _Resource,
+    names: list[Any],
+    where: str,
+    issues: list[ValidationIssue],
+    max_length: int,
+) -> None:
+    """Port names must be unique, and valid IANA service names (containers) or DNS labels."""
+    present = [str(n) for n in names if n]
+    duplicates = sorted({n for n in present if present.count(n) > 1})
+    if duplicates:
+        issues.append(
+            ValidationIssue(
+                severity="error",
+                code="DUPLICATE_PORT_NAME",
+                message=f"{resource.ref} {where} reuses port name(s): {', '.join(duplicates)}.",
+                file=str(resource.file),
+                resource=resource.ref,
+                suggestion="The API server rejects duplicate port names; give each port its own.",
+            )
+        )
+    for name in dict.fromkeys(present):
+        valid = (
+            len(name) <= max_length
+            and bool(_PORT_NAME.match(name))
+            and "--" not in name
+            and (max_length > 15 or any(c.isalpha() for c in name))
+        )
+        if not valid:
             issues.append(
                 ValidationIssue(
                     severity="error",
-                    code="MULTIPORT_UNNAMED",
-                    message=f"{resource.ref} has multiple ports; every port must be named.",
+                    code="INVALID_PORT_NAME",
+                    message=(
+                        f"{resource.ref} {where} port name '{name}' is invalid: at most "
+                        f"{max_length} lowercase alphanumerics or '-', with at least one letter."
+                    ),
                     file=str(resource.file),
                     resource=resource.ref,
                 )
@@ -778,16 +930,26 @@ def _require(
     )
 
 
+def placeholder_keys(doc: dict[str, Any]) -> list[str]:
+    """Keys of a Secret document that still hold the placeholder, in either form."""
+    keys: set[str] = set()
+    for section, marker in (("stringData", REQUIRED_SECRET), ("data", _PLACEHOLDER_B64)):
+        values = doc.get(section)
+        if isinstance(values, dict):
+            keys.update(str(k) for k, v in values.items() if str(v).strip() == marker)
+    return sorted(keys)
+
+
 def _check_secrets(resources: list[_Resource], issues: list[ValidationIssue]) -> None:
-    """Flag placeholder credentials so nobody deploys a Secret full of markers."""
+    """Flag placeholder credentials so nobody deploys a Secret full of markers.
+
+    A warning, not an error: generated output is expected to have them, and
+    apply_manifests refuses to send them to the cluster.
+    """
     for resource in resources:
         if resource.kind != "Secret":
             continue
-        placeholders = [
-            key
-            for key, value in {**(resource.doc.get("stringData") or {}), **(resource.doc.get("data") or {})}.items()
-            if str(value).strip() == REQUIRED_SECRET
-        ]
+        placeholders = placeholder_keys(resource.doc)
         if placeholders:
             issues.append(
                 ValidationIssue(
@@ -801,18 +963,17 @@ def _check_secrets(resources: list[_Resource], issues: list[ValidationIssue]) ->
                     resource=resource.ref,
                     suggestion=(
                         "Replace them with real values, or create the Secret out-of-band with "
-                        f"'kubectl create secret generic {resource.name} --from-literal=KEY=VALUE'."
+                        f"'kubectl create secret generic {resource.name} --from-literal=KEY=VALUE'. "
+                        "apply_manifests skips a placeholder Secret that already exists in the "
+                        "cluster and refuses to create one."
                     ),
                 )
             )
 
 
-def _is_dns1123(name: str) -> bool:
-    if not name or len(name) > 253:
-        return False
-    return all(
-        part and part[0].isalnum() and part[-1].isalnum()
-        and all(c.isalnum() or c == "-" for c in part)
-        and part.lower() == part
-        for part in name.split(".")
-    )
+def _valid_name(kind: str, name: str) -> bool:
+    """Most kinds take a DNS-1123 subdomain; Services and Namespaces a DNS label."""
+    label_rule = _LABEL_NAMED_KINDS.get(kind)
+    if label_rule is not None:
+        return len(name) <= 63 and bool(label_rule.match(name))
+    return len(name) <= 253 and bool(_DNS1123_SUBDOMAIN.match(name))

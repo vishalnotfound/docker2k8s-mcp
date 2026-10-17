@@ -1,8 +1,5 @@
 # docker2k8s-mcp
 
-[![M8ven Score](https://m8ven.ai/badge/mcp/vishalnotfound/docker2k8s-mcp-server)](https://m8ven.ai/mcp/vishalnotfound/docker2k8s-mcp-server)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
 An MCP server that lets an LLM migrate a Docker / Docker Compose application to
 Kubernetes — inspect it, plan the migration, generate manifests, validate them,
 deploy them after you approve, verify the result, and diagnose what went wrong.
@@ -45,20 +42,20 @@ reference agent included here.
 ```text
 ┌──────────────────────────────────────────────────────────┐
 │  MCP Client + LLM                                        │
-│  Claude Desktop / Claude Code / Cursor / client/agent.py │
+│  Claude Desktop / Claude Code / Cursor / bundled agent   │
 └───────────────────────────┬──────────────────────────────┘
                             │ MCP (stdio | streamable HTTP | SSE)
                             ▼
 ┌──────────────────────────────────────────────────────────┐
-│  MCP Server               src/server.py                  │
+│  MCP Server               docker2k8s_mcp/server.py       │
 └───────────────────────────┬──────────────────────────────┘
                             ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Tools (thin wrappers)    src/tools/                     │
+│  Tools (thin wrappers)    docker2k8s_mcp/tools/          │
 └───────────────────────────┬──────────────────────────────┘
                             ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Services                 src/services/                  │
+│  Services                 docker2k8s_mcp/services/       │
 │    docker_service     ─▶ Filesystem + YAML               │
 │    migration_service  ─▶ pure logic                      │
 │    k8s_service        ─▶ Kubernetes API + kubectl        │
@@ -143,13 +140,15 @@ Everything is configured through the environment or `.env`.
 | `KUBECTL_PATH` | `kubectl` | Path to the kubectl binary. |
 | `KUBE_CONTEXT` | *(current)* | kubectl context to use. |
 | `KUBE_NAMESPACE` | `default` | Default target namespace. |
-| `GENERATED_DIR` | `./generated` | Where manifests are written. |
-| `ALLOWED_ROOTS` | cwd + project root | **Filesystem sandbox.** OS-path-separator delimited. |
-| `LOG_LEVEL` | `INFO` | Standard logging level. |
+| `GENERATED_DIR` | `./generated` | Where manifests are written. Relative to the checkout. |
+| `ALLOWED_ROOTS` | checkout + cwd | **Filesystem sandbox.** OS-path-separator delimited. The working directory is only included when it is not a filesystem root or your home folder. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
 | `DEBUG` | `false` | Include tracebacks in tool errors. |
 | `KUBECTL_TIMEOUT` | `120` | Seconds before a kubectl call is aborted. |
+| `MCP_AUTH_TOKEN` | *(empty)* | Bearer token for the http/sse transports. **Required** to listen on anything but loopback. |
 
-Never commit `.env`; it is git-ignored.
+`.env` is read from the checkout, not the working directory, so a server started
+by an MCP client picks up the same settings. Never commit `.env`; it is git-ignored.
 
 ---
 
@@ -166,7 +165,13 @@ docker2k8s-mcp --transport http --host 127.0.0.1 --port 8000   # -> http://127.0
 docker2k8s-mcp --transport sse --port 8000                     # -> http://127.0.0.1:8000/sse
 ```
 
-Or without installing: `python -m src.main --transport http`.
+Or without installing: `python -m docker2k8s_mcp.main --transport http`.
+
+Every tool, including `apply_manifests`, is reachable by whoever can connect, so
+the HTTP transports **refuse to listen on a non-loopback address** unless
+`MCP_AUTH_TOKEN` is set. Clients then send `Authorization: Bearer <token>`; the
+bundled agent and web client read the token from `.env`. `--insecure-no-auth`
+overrides the check for servers behind an authenticating proxy.
 
 Logs go to stderr, because stdout carries the MCP protocol on the stdio transport.
 
@@ -175,12 +180,17 @@ Logs go to stderr, because stdout carries the MCP protocol on the stdio transpor
 ```bash
 docker build -t docker2k8s-mcp .
 
-docker run --rm -p 8000:8000 \
+docker run --rm -p 127.0.0.1:8000:8000 \
+  -e MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
   -v "$HOME/.kube:/home/mcp/.kube:ro" \
   -v "$PWD/examples:/workspace:ro" \
   -v d2k-generated:/data \
   docker2k8s-mcp
 ```
+
+The container listens on `0.0.0.0` inside, so it will not start without
+`MCP_AUTH_TOKEN`; publishing on `127.0.0.1` keeps it off your network as well.
+Give clients the same token.
 
 The server needs **kubectl and a kubeconfig**, not a Docker daemon — project
 inspection is pure filesystem and YAML work, so no Docker-in-Docker is required.
@@ -230,7 +240,8 @@ claude mcp add docker2k8s -- /absolute/path/to/.venv/bin/docker2k8s-mcp
 `env`), in that editor's MCP settings file.
 
 **Any client, over HTTP** — start the server with `--transport http` and point the
-client at `http://127.0.0.1:8000/mcp`.
+client at `http://127.0.0.1:8000/mcp`, sending `Authorization: Bearer <token>` if
+`MCP_AUTH_TOKEN` is set.
 
 **From Python:**
 
@@ -258,13 +269,21 @@ A minimal OpenAI-driven agent, included to demonstrate the full loop:
 ```bash
 export OPENAI_API_KEY=sk-...
 
-python -m client.agent "Migrate examples/fastapi-mysql to Kubernetes."
-python -m client.agent                                    # interactive
-python -m client.agent --http http://127.0.0.1:8000/mcp "..."
+docker2k8s-agent "Migrate examples/fastapi-mysql to Kubernetes."
+docker2k8s-agent                                          # interactive
+docker2k8s-agent --http http://127.0.0.1:8000/mcp "..."   # sends MCP_AUTH_TOKEN if set
 ```
 
+(`python -m docker2k8s_mcp.client.agent` works too.)
+
 The model picks every tool. The client adds one thing: it prompts you at the
-terminal before any deployment, on top of the server's own approval gate.
+terminal before any call that could deploy, on top of the server's own approval
+gate. Only a literal `dry_run: true` skips the prompt, and after you say yes the
+client sends exactly the approved, non-dry-run call.
+
+`python web_client.py` (or `run_web.bat`) serves the same agent as a chat page on
+`http://localhost:3000`. It only accepts WebSocket connections from that page's
+own origin, so other sites you have open cannot drive it.
 
 ---
 
@@ -338,7 +357,7 @@ Manual steps:
 # 1. Build the image so the cluster can find it (Docker Desktop shares its store)
 docker build -t fastapi-mysql-api:local examples/fastapi-mysql
 
-# 2. Fill in the placeholder secrets
+# 2. Create the Secrets (or fill the placeholders in generated/.../*-secret.yaml)
 kubectl create secret generic mysql-secret \
   --from-literal=MYSQL_ROOT_PASSWORD='...' \
   --from-literal=MYSQL_PASSWORD='...' \
@@ -346,7 +365,10 @@ kubectl create secret generic mysql-secret \
 ```
 
 Then approve. The agent applies the manifests, verifies the rollout, and
-diagnoses anything that fails.
+diagnoses anything that fails. `apply_manifests` leaves a Secret that already
+exists alone instead of overwriting it with placeholders, and refuses to create
+one that still holds them. Regenerating keeps values you typed into a generated
+Secret file.
 
 ```bash
 kubectl port-forward svc/api 8000:8000
@@ -377,21 +399,21 @@ curl http://localhost:8000/health
 
 | Tool | Purpose |
 |---|---|
-| `generate_manifests` | Writes YAML to `generated/<project>/k8s`. Writes files only. |
-| `validate_manifests` | Selector, port, probe, reference, duplicate and naming checks. |
+| `generate_manifests` | Writes YAML to `generated/<project>/k8s`. Writes files only; earlier files the plan no longer produces become `*.stale`. |
+| `validate_manifests` | Selector, port, port-name, probe, reference, duplicate, naming and label checks. |
 
 ### Cluster (read-only, except where noted)
 
 | Tool | Purpose |
 |---|---|
 | `get_cluster_info` | Is a cluster reachable? Nodes and namespaces. |
-| `apply_manifests` | **Destructive.** Requires `approved=true`; refuses invalid manifests. `dry_run=true` is safe. |
+| `apply_manifests` | **Destructive.** Requires `approved=true`; refuses invalid manifests, unsupported kinds, placeholder Secrets and objects owned by another project. `dry_run=true` is safe. |
 | `get_deployment_status` | Desired vs ready replicas and rollout conditions. |
 | `get_pods` | Phase, readiness, restarts, detected problems. |
 | `get_pod_logs` | Container logs; `previous=true` for a crash loop. |
 | `get_services` | Type, ports, selector, endpoint count. |
 | `get_events` | Recent events, including warnings. |
-| `verify_deployment` | All post-deployment checks in one call. |
+| `verify_deployment` | All post-deployment checks in one call; optional `health_path` probe through the API proxy. |
 | `diagnose_deployment` | Problem, evidence, likely cause, suggested fix. |
 
 ---
@@ -402,25 +424,35 @@ curl http://localhost:8000/health
 tool. Every cluster capability is a separate named tool with a typed schema.
 kubectl is invoked with an explicit argv list, never through a shell, and only
 from `k8s_service.py`. Names are validated against DNS-1123 before they reach a
-command line, so a crafted argument cannot become a flag.
+command line, and the kube context is passed as a single `--context=` argument,
+so a crafted value cannot become a flag. `apply_manifests` deploys only
+namespaced application kinds (plus a Namespace): nothing that grants RBAC or
+node access. `health_path` is checked so it cannot leave the service proxy.
 
 **Filesystem sandbox.** Paths are resolved (collapsing `..`) and then checked for
-containment inside `ALLOWED_ROOTS`, which defaults to the working directory and
-the project root. Anything outside is refused. Set `ALLOWED_ROOTS` explicitly when
-running the server for someone else.
+containment inside `ALLOWED_ROOTS`, which defaults to the checkout and the working
+directory (never a filesystem root or your home folder). Anything outside is
+refused, for reads and for `generate_manifests`' `output_dir` alike. Set
+`ALLOWED_ROOTS` explicitly when running the server for someone else.
 
 **Secrets never leave the boundary.** Values matching credential patterns — and
 connection strings with embedded passwords — are replaced with `<REDACTED>` when
 parsed, so they never reach the model, the logs or a manifest. Generated Secrets
 contain `<REQUIRED_SECRET>` placeholders, and validation warns while they remain.
-Fill them in with `kubectl create secret` or a secrets manager.
+Fill them in with `kubectl create secret` or a secrets manager. A value that
+references a secret `.env` variable is routed to the Secret, never resolved into
+a ConfigMap, image name or command.
 
 Kubernetes Secrets are base64-encoded, not encrypted. For production, enable
 encryption at rest or use an external secrets operator.
 
 **Deployment requires approval.** `apply_manifests` refuses without
-`approved=true`, and refuses manifests that fail validation. The tool is annotated
-`destructive_hint`, so clients that surface annotations will prompt as well.
+`approved=true`, and refuses manifests that fail validation. It validates and
+applies the same parsed documents, so nothing can change in between. The tool is
+annotated `destructive_hint`, so clients that surface annotations will prompt as
+well.
+
+**The HTTP transports require a token off-loopback.** See *Running the MCP server*.
 
 **Errors do not leak internals.** Domain errors return a message and a hint;
 anything unexpected returns a generic failure and logs the traceback server-side.
@@ -431,8 +463,9 @@ Set `DEBUG=true` to include tracebacks in tool output while developing.
 ## Development
 
 ```text
-src/
+docker2k8s_mcp/
   main.py          entry point, transports
+  http_auth.py     bearer-token check for http/sse
   server.py        MCP server, tool registration, instructions
   config.py        settings
   schemas.py       Pydantic models
@@ -442,8 +475,9 @@ src/
   services/        business logic
   generators/      plan -> YAML
   validators/      YAML -> issues
-client/agent.py    reference LLM agent
-examples/          example application
+  client/          reference LLM agent and shared client helpers
+web_client.py      browser chat client (with index.html)
+examples/          example applications
 tests/             unit + integration tests
 ```
 
@@ -464,11 +498,12 @@ pip install -e ".[dev]"
 
 pytest                    # unit tests; no Docker or Kubernetes needed
 pytest -m integration     # requires a running cluster
-pytest --cov=src          # with coverage
+pytest --cov=docker2k8s_mcp   # with coverage
 ```
 
 Unit tests build small Docker projects in a `tmp_path` fixture, so they are fast
-and hermetic. Integration tests are marked and excluded by default.
+and hermetic. The cluster-side logic (apply, verify, diagnose) is tested against
+a fake API and a fake kubectl. Integration tests are marked and excluded by default.
 
 ---
 
@@ -491,4 +526,4 @@ it is solid end to end.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT

@@ -17,7 +17,7 @@ from .tools import deployment, docker, kubernetes, migration
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "docker2k8s"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 
 #: Sent to the client on initialize. Clients surface this to their model, so it
 #: is how a generic MCP client learns the workflow without any custom code.
@@ -32,7 +32,7 @@ rather than following a fixed script:
 2. ANALYZE   analyze_project explains how each Docker concept maps to Kubernetes
              and what cannot be translated automatically.
 3. PLAN      create_migration_plan produces the reviewable plan. Show the user
-             its warnings and manual_steps.
+             its blockers, warnings and manual_steps. Resolve blockers first.
 4. GENERATE  generate_manifests writes YAML under generated/<project>/k8s.
 5. VALIDATE  validate_manifests. Never skip this. If valid=false, fix the cause
              and regenerate; do not deploy.
@@ -49,7 +49,8 @@ Rules:
 - Never deploy without explicit user approval in this conversation.
 - Never skip validation.
 - Secret values are never returned by these tools. Generated Secrets contain
-  <REQUIRED_SECRET> placeholders that a human must fill in before the app works.
+  <REQUIRED_SECRET> placeholders that a human must fill in (or create the Secret
+  with kubectl) before deploying; apply_manifests refuses placeholder Secrets.
 - Locally built images must exist in a registry the cluster can reach. Docker
   Desktop shares its image store with its Kubernetes cluster; other clusters do not.
 """

@@ -6,15 +6,19 @@ cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment...
     python -m venv .venv
-    call .venv\Scripts\activate.bat
+)
+call .venv\Scripts\activate.bat
+
+REM Reinstall whenever pyproject.toml changed since the last install, so new
+REM dependencies and entry points are picked up.
+python -c "import os,sys; s='.venv/.installed'; sys.exit(0 if os.path.exists(s) and os.path.getmtime(s) >= os.path.getmtime('pyproject.toml') else 1)" || (
     echo Installing dependencies...
-    pip install -e .
-    if exist ".env.example" if not exist ".env" (
-        copy .env.example .env
-        echo Created .env from .env.example
-    )
-) else (
-    call .venv\Scripts\activate.bat
+    pip install -e . && type nul > .venv\.installed
+)
+
+if exist ".env.example" if not exist ".env" (
+    copy .env.example .env
+    echo Created .env from .env.example
 )
 
 if "%~1"=="" (

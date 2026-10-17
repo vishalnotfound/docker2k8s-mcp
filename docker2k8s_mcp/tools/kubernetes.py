@@ -8,10 +8,21 @@ from mcp.types import ToolAnnotations
 from ..generators import kubernetes as generator
 from ..schemas import GenerationResult, ValidationResult
 from ..services import migration_service
+from ..validators import kubernetes as validator
 from . import mcp_errors
 
-READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-WRITES_FILES = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+WRITES_FILES = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 
 def register(mcp: MCPServer) -> None:
@@ -26,9 +37,11 @@ def register(mcp: MCPServer) -> None:
             "are produced: a stateless service gets a Deployment, Service and ConfigMap, "
             "while a database also gets a StatefulSet with volumeClaimTemplates and a "
             "headless Service. Secrets are written with <REQUIRED_SECRET> placeholders, "
-            "never real credentials. The plan is re-derived from the project, so pass the "
-            "same namespace/image_registry you passed to create_migration_plan. Writes "
-            "files only -- it does not touch a cluster."
+            "never real credentials; values a human already filled into a generated Secret "
+            "file are kept on regeneration. Files from an earlier run that the plan no "
+            "longer produces are renamed to *.stale. The plan is re-derived from the "
+            "project, so pass the same namespace/image_registry you passed to "
+            "create_migration_plan. Writes files only -- it does not touch a cluster."
         ),
     )
     @mcp_errors
@@ -48,7 +61,8 @@ def register(mcp: MCPServer) -> None:
             image_registry: Registry prefix for locally built images.
             output_dir: Override the output directory. Defaults to
                 generated/<project-name>/k8s, which keeps projects from overwriting
-                each other.
+                each other. A relative path is taken inside the generated folder, and
+                the directory must lie within the server's allowed roots.
             include_ingress: Also generate an Ingress for externally exposed services.
                 Requires an ingress controller in the cluster.
             ingress_host: Hostname for the generated Ingress rules.
@@ -83,6 +97,4 @@ def register(mcp: MCPServer) -> None:
         Args:
             path: A YAML file, or the output_dir returned by generate_manifests.
         """
-        from ..validators import kubernetes as validator
-
         return validator.validate_manifests(path)

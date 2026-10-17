@@ -9,7 +9,12 @@ from ..schemas import MigrationPlan, ProjectAnalysis
 from ..services import migration_service
 from . import mcp_errors
 
-READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
+READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 
 def register(mcp: MCPServer) -> None:
@@ -43,7 +48,7 @@ def register(mcp: MCPServer) -> None:
             "Build the concrete, reviewable migration plan: per-service workload kind, "
             "replicas, images, ports, ConfigMap/Secret split, volumes, probes and "
             "resources, plus flat summaries of resources, ports, environment variables, "
-            "secrets, volumes and healthchecks, with warnings and manual_steps. "
+            "secrets, volumes and healthchecks, with warnings, blockers and manual_steps. "
             "SHOW THIS PLAN TO THE USER before generating or deploying anything. Nothing "
             "is written to disk and no cluster is touched."
         ),
@@ -57,7 +62,7 @@ def register(mcp: MCPServer) -> None:
         """Produce the migration plan for a project.
 
         Args:
-            path: Project directory containing a Compose file.
+            path: Project directory, or the Compose file itself.
             namespace: Target Kubernetes namespace. Defaults to the server's configured one.
             image_registry: Registry prefix to prepend to locally built images,
                 e.g. "ghcr.io/acme". Leave unset for a local Docker Desktop cluster.

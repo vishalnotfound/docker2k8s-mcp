@@ -8,8 +8,7 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /build
 COPY pyproject.toml README.md ./
-COPY src ./src
-COPY client ./client
+COPY docker2k8s_mcp ./docker2k8s_mcp
 RUN pip install --no-cache-dir --prefix=/install .
 
 
@@ -30,6 +29,8 @@ RUN set -eux; \
     case "$arch" in amd64) karch=amd64 ;; arm64) karch=arm64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac; \
     curl -fsSLo /usr/local/bin/kubectl \
         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl"; \
+    echo "$(curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl.sha256")  /usr/local/bin/kubectl" \
+        | sha256sum -c -; \
     chmod +x /usr/local/bin/kubectl; \
     apt-get purge -y curl; \
     apt-get autoremove -y; \
@@ -48,6 +49,8 @@ USER mcp
 VOLUME ["/data"]
 
 # Default to HTTP so the container is reachable from a client outside it.
+# Listening on 0.0.0.0 requires MCP_AUTH_TOKEN (the server refuses to start
+# without it), because every tool, including apply_manifests, is reachable.
 # For stdio, override with: docker run -i ... --transport stdio
 EXPOSE 8000
 ENTRYPOINT ["docker2k8s-mcp"]

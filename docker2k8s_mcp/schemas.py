@@ -69,6 +69,7 @@ class VolumeMount(BaseModel):
     source: str | None = None
     kind: Literal["named", "bind", "anonymous", "tmpfs"] = "named"
     read_only: bool = False
+    size: str | None = None  # tmpfs size, as a Kubernetes quantity
 
 
 class HealthCheck(BaseModel):
@@ -113,7 +114,13 @@ class ComposeService(BaseModel):
     user: str | None = None
     working_dir: str | None = None
     privileged: bool = False
+    cap_add: list[str] = Field(default_factory=list)
+    cap_drop: list[str] = Field(default_factory=list)
+    # A known datastore image: becomes a StatefulSet. Persistent storage alone
+    # does not make a service stateful; see VolumeMount.kind == "named".
     stateful: bool = False
+    # ${VAR} references that could not be resolved from the project's .env.
+    unresolved_variables: list[str] = Field(default_factory=list)
 
 
 class ComposeInspection(BaseModel):
@@ -122,6 +129,8 @@ class ComposeInspection(BaseModel):
     services: list[ComposeService] = Field(default_factory=list)
     named_volumes: list[str] = Field(default_factory=list)
     networks: list[str] = Field(default_factory=list)
+    # File that ${VAR} interpolation values were read from, if any.
+    env_source: str | None = None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -198,13 +207,17 @@ class VolumePlan(BaseModel):
     access_mode: str = "ReadWriteOnce"
     storage_class: str | None = None
     read_only: bool = False
-    source_kind: Literal["named", "bind", "anonymous"] = "named"
+    source_kind: Literal["named", "bind", "anonymous", "tmpfs"] = "named"
+    # PVC backing a Deployment volume. Services sharing a Compose volume share it.
+    claim_name: str | None = None
+    size_limit: str | None = None  # emptyDir sizeLimit for tmpfs
 
 
 class ProbePlan(BaseModel):
     kind: Literal["httpGet", "exec", "tcpSocket"]
     path: str | None = None
     port: int | None = None
+    scheme: Literal["HTTP", "HTTPS"] | None = None
     command: list[str] | None = None
     initial_delay_seconds: int = 10
     period_seconds: int = 10
@@ -228,6 +241,9 @@ class ServicePlan(BaseModel):
     build_context: str | None = None
     workload_kind: WorkloadKind = "Deployment"
     replicas: int = 1
+    # Recreate when the pods mount a ReadWriteOnce claim, so a rollout never
+    # waits on a volume the old pod still holds.
+    strategy: Literal["RollingUpdate", "Recreate"] = "RollingUpdate"
     image_pull_policy: str = "IfNotPresent"
     command: list[str] | None = None
     args: list[str] | None = None
@@ -243,6 +259,12 @@ class ServicePlan(BaseModel):
     liveness_probe: ProbePlan | None = None
     readiness_probe: ProbePlan | None = None
     resources: ResourceLimits | None = None
+    privileged: bool = False
+    run_as_user: int | None = None
+    run_as_non_root: bool = False
+    allow_privilege_escalation: bool | None = None
+    capabilities_add: list[str] = Field(default_factory=list)
+    capabilities_drop: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -262,6 +284,8 @@ class MigrationPlan(BaseModel):
     volumes: list[str] = Field(default_factory=list)
     healthchecks: list[str] = Field(default_factory=list)
     warnings: list[MigrationWarning] = Field(default_factory=list)
+    # Problems that make an automatic migration unsafe; resolve before deploying.
+    blockers: list[str] = Field(default_factory=list)
     manual_steps: list[str] = Field(default_factory=list)
 
 
@@ -317,6 +341,9 @@ class ApplyResult(BaseModel):
     dry_run: bool
     namespace: str
     resources: list[AppliedResource] = Field(default_factory=list)
+    # Documents deliberately not sent to the cluster, e.g. placeholder Secrets.
+    skipped: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     output: str = ""
     next_step: str = ""
 
@@ -329,6 +356,7 @@ class ContainerState(BaseModel):
     reason: str | None = None
     message: str | None = None
     exit_code: int | None = None
+    seconds_since_last_restart: int | None = None
 
 
 class PodInfo(BaseModel):
